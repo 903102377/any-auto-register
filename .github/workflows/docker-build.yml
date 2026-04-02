@@ -4,10 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'any-auto-register'
+        description: '可选的镜像标签名称（留空则使用默认值）'
         required: false
         default: ''
         type: string
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
   build-and-export-image:
@@ -57,21 +61,43 @@ jobs:
             CAMOUFOX_VERSION=135.0.1
             CAMOUFOX_RELEASE=beta.24
       
+      - name: Verify image was built
+        run: |
+          echo "=== Checking built images ==="
+          docker images
+          
+          IMAGE_NAME="any-auto-register"
+          IMAGE_TAG="${{ steps.meta.outputs.tags }}"
+          
+          echo "=== Checking specific image: ${IMAGE_NAME}:${IMAGE_TAG} ==="
+          docker images ${IMAGE_NAME}:${IMAGE_TAG} --format "{{.Repository}}:{{.Tag}} - Size: {{.Size}}"
+          
+          if ! docker image inspect ${IMAGE_NAME}:${IMAGE_TAG} > /dev/null 2>&1; then
+            echo "ERROR: Image ${IMAGE_NAME}:${IMAGE_TAG} not found!"
+            docker images
+            exit 1
+          fi
+      
       - name: Export image to tar file
         run: |
           IMAGE_TAG="${{ steps.meta.outputs.tags }}"
-          
-          # Create filename from tag
           FILENAME="any-auto-register-${IMAGE_TAG}.tar"
           
-          # Export to tar
           echo "Exporting image to: ${FILENAME}"
+          echo "Source image: any-auto-register:${IMAGE_TAG}"
+          
           docker save -o ${FILENAME} any-auto-register:${IMAGE_TAG}
           
-          # Show file size
+          echo "=== Exported file details ==="
           ls -lh ${FILENAME}
+          FILE_SIZE=$(stat -c%s ${FILENAME} 2>/dev/null || stat -f%z ${FILENAME} 2>/dev/null)
+          echo "File size in bytes: ${FILE_SIZE}"
           
-          # Set env for upload step
+          if [ "${FILE_SIZE}" -lt 100000000 ]; then
+            echo "WARNING: File size seems too small (< 100MB)"
+            echo "This might indicate an incomplete export"
+          fi
+          
           echo "EXPORTED_FILE=${FILENAME}" >> $GITHUB_ENV
       
       - name: Upload image as artifact
