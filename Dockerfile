@@ -56,17 +56,17 @@ RUN pip install --upgrade pip \
          echo "playwright browser install failed, retrying ($attempt/3)..." >&2; \
          sleep 5; \
        done \
-    && [ "$installed" -eq 1 ] \
     && CAMOUFOX_VERSION="$CAMOUFOX_VERSION" CAMOUFOX_RELEASE="$CAMOUFOX_RELEASE" python /tmp/install_camoufox.py
 
 COPY . .
 COPY --from=frontend-builder /app/static /app/static
 
-RUN apt-get update && apt-get install -y --no-install-recommends dos2unix git iproute2 procps \
+RUN apt-get update && apt-get install -y --no-install-recommends dos2unix \
     && dos2unix /app/docker/entrypoint.sh \
     && chmod +x /app/docker/entrypoint.sh \
     && mkdir -p /runtime /runtime/logs /runtime/smstome_used /_ext_targets \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && pip cache purge
 
 EXPOSE 8000 8889
 
