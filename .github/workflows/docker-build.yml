@@ -1,11 +1,13 @@
 name: Build Docker Image and Export to Tarball
 
 on:
-  push:
-    branches: [ main, master ]
-    tags: [ 'v*.*.*' ]
-  pull_request:
-    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'any-auto-register'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   build-and-export-image:
@@ -21,19 +23,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
+      - name: Generate image tag
+        id: taggen
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            echo "TAG=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+            SHA_SHORT=${{ github.sha }}
+            echo "TAG=manual-${TIMESTAMP}-${SHA_SHORT:0:7}" >> $GITHUB_OUTPUT
+          fi
+      
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
           image: any-auto-register
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,prefix=
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') || github.ref == format('refs/heads/{0}', 'master') }}
+            type=raw,value=${{ steps.taggen.outputs.TAG }}
       
       - name: Build Docker image
         uses: docker/build-push-action@v5
@@ -52,27 +59,25 @@ jobs:
       
       - name: Export image to tar file
         run: |
-          # Get the first tag from metadata
           IMAGE_TAG="${{ steps.meta.outputs.tags }}"
-          FIRST_TAG=$(echo "$IMAGE_TAG" | head -n 1)
           
-          # Create filename from tag (replace / and : with -)
-          FILENAME=$(echo "$FIRST_TAG" | tr '/' '-' | tr ':' '-')
+          # Create filename from tag
+          FILENAME="any-auto-register-${IMAGE_TAG}.tar"
           
           # Export to tar
-          echo "Exporting image to: ${FILENAME}.tar"
-          docker save -o ${FILENAME}.tar any-auto-register:${FIRST_TAG##*:}
+          echo "Exporting image to: ${FILENAME}"
+          docker save -o ${FILENAME} any-auto-register:${IMAGE_TAG}
           
           # Show file size
-          ls -lh ${FILENAME}.tar
+          ls -lh ${FILENAME}
           
           # Set env for upload step
-          echo "EXPORTED_FILE=${FILENAME}.tar" >> $GITHUB_ENV
+          echo "EXPORTED_FILE=${FILENAME}" >> $GITHUB_ENV
       
       - name: Upload image as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: any-auto-register-docker-image
+          name: any-auto-register-docker-image-${{ steps.taggen.outputs.TAG }}
           path: ${{ env.EXPORTED_FILE }}
           retention-days: 30
           if-no-files-found: error
