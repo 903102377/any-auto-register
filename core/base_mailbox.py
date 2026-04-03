@@ -27,7 +27,10 @@ class BaseMailbox(ABC):
         task_control = getattr(self, "_task_control", None)
         if task_control is None:
             return
-        task_control.checkpoint(consume_skip=consume_skip)
+        task_control.checkpoint(
+            consume_skip=consume_skip,
+            attempt_id=getattr(self, "_task_attempt_token", None),
+        )
 
     def _sleep_with_checkpoint(self, seconds: float) -> None:
         remaining = max(float(seconds or 0), 0.0)
@@ -139,7 +142,72 @@ class BaseMailbox(ABC):
     def get_current_ids(self, account: MailboxAccount) -> set:
         """返回当前邮件 ID 集合（用于过滤旧邮件）"""
         ...
+    def _yyds_safe_extract(self, text: str, pattern: str = None) -> Optional[str]:
+        """通用验证码提取逻辑：若有捕获组则返回 group(1)，否则返回 group(0)"""
+        import re
 
+        text = str(text or "")
+        if not text:
+            return None
+
+        # [修复点 1]：优先过滤掉所有 URL 链接，直接从根源防止提取到追踪链接（如 SendGrid）里的随机数字
+        text = re.sub(r"https?://\S+", "", text)
+
+        patterns = []
+        if pattern:
+            # [修复点 2]：如果外部传入了纯 \d{6} 的粗糙正则，自动为其加上字母数字边界
+            if pattern in (r"\d{6}", r"(\d{6})"):
+                patterns.append(r"(?<![a-zA-Z0-9])(\d{6})(?![a-zA-Z0-9])")
+            else:
+                patterns.append(pattern)
+
+        # 先匹配带明显语义的验证码，避免误提取 MIME boundary、时间戳等 6 位数字。
+        patterns.extend(
+            [
+                r"(?is)(?:verification\s+code|one[-\s]*time\s+(?:password|code)|security\s+code|login\s+code|验证码|校验码|动态码|認證碼|驗證碼)[^0-9]{0,30}(\d{6})",
+                r"(?is)\bcode\b[^0-9]{0,12}(\d{6})",
+                # [修复点 3]：修改兜底正则，严格要求 6 位数字前后不能有字母或数字（防止匹配 u20216706）
+                r"(?<![a-zA-Z0-9])(\d{6})(?![a-zA-Z0-9])",
+            ]
+        )
+
+        for regex in patterns:
+            m = re.search(regex, text)
+            if m:
+                # 兼容逻辑：若 pattern 中有捕获组则取 group(1)，否则取 group(0)
+                return m.group(1) if m.groups() else m.group(0)
+        return None
+
+    def _yyds_decode_raw_content(self, raw: str) -> str:
+        """解析邮件原始文本 (借鉴自 Fugle)，处理 Quoted-Printable 和 HTML 实体"""
+        import quopri, html, re
+
+        text = str(raw or "")
+        if not text:
+            return ""
+            
+        # [修复点 4]：只有在明确包含常见邮件 Header 时，才进行 \r\n\r\n 切分。
+        # 否则会误删 MaliAPI 等直接返回的已解析 JSON 正文内容（遇到普通的正文换行就错误截断了）
+        if re.search(r"(?im)^(?:Return-Path|Received|Date|From|To|Subject|Content-Type):", text):
+            if "\r\n\r\n" in text:
+                text = text.split("\r\n\r\n", 1)[1]
+            elif "\n\n" in text:
+                text = text.split("\n\n", 1)[1]
+                
+        try:
+            # 处理 Quoted-Printable
+            decoded_bytes = quopri.decodestring(text)
+            text = decoded_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        # 清除 HTML 标签并反转义
+        text = html.unescape(text)
+        text = re.sub(r"(?im)^content-(?:type|transfer-encoding):.*$", " ", text)
+        text = re.sub(r"(?im)^--+[_=\w.-]+$", " ", text)
+        text = re.sub(r"(?i)----=_part_[\w.]+", " ", text)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
 
 def create_mailbox(
     provider: str, extra: dict = None, proxy: str = None
@@ -185,6 +253,13 @@ def create_mailbox(
             api_key=extra.get("maliapi_api_key", ""),
             domain=extra.get("maliapi_domain", ""),
             auto_domain_strategy=extra.get("maliapi_auto_domain_strategy", ""),
+            proxy=proxy,
+        )
+    elif provider == "gptmail":
+        return GPTMailMailbox(
+            api_url=extra.get("gptmail_base_url", "https://mail.chatgpt.org.uk"),
+            api_key=extra.get("gptmail_api_key", ""),
+            domain=extra.get("gptmail_domain", ""),
             proxy=proxy,
         )
     elif provider == "cfworker":
@@ -746,9 +821,38 @@ class DuckMailMailbox(BaseMailbox):
         code_pattern: str = None,
         **kwargs,
     ) -> str:
+        from datetime import datetime
         import re
 
         seen = set(before_ids or [])
+        exclude_codes = {
+            str(code).strip()
+            for code in (kwargs.get("exclude_codes") or set())
+            if str(code or "").strip()
+        }
+        otp_sent_at = kwargs.get("otp_sent_at")
+
+        def _parse_message_timestamp(*values) -> Optional[float]:
+            for value in values:
+                if value in (None, ""):
+                    continue
+                if isinstance(value, (int, float)):
+                    numeric = float(value)
+                    return numeric / 1000 if numeric > 10_000_000_000 else numeric
+                text = str(value).strip()
+                if not text:
+                    continue
+                try:
+                    numeric = float(text)
+                    return numeric / 1000 if numeric > 10_000_000_000 else numeric
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    normalized = text.replace("Z", "+00:00")
+                    return datetime.fromisoformat(normalized).timestamp()
+                except ValueError:
+                    continue
+            return None
 
         def poll_once() -> Optional[str]:
             try:
@@ -771,11 +875,30 @@ class DuckMailMailbox(BaseMailbox):
                             + str(detail.get("subject") or "")
                         )
                     except Exception:
+                        detail = {}
                         body = str(msg.get("subject") or "")
+                    message_ts = _parse_message_timestamp(
+                        detail.get("createdAt"),
+                        detail.get("created_at"),
+                        detail.get("receivedAt"),
+                        detail.get("received_at"),
+                        detail.get("date"),
+                        detail.get("created"),
+                        msg.get("createdAt"),
+                        msg.get("created_at"),
+                        msg.get("receivedAt"),
+                        msg.get("received_at"),
+                        msg.get("date"),
+                        msg.get("created"),
+                    )
+                    if otp_sent_at and message_ts and message_ts < float(otp_sent_at):
+                        continue
                     body = re.sub(
                         r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "", body
                     )
                     code = self._safe_extract(body, code_pattern)
+                    if code and code in exclude_codes:
+                        continue
                     if code:
                         return code
             except Exception:
@@ -963,6 +1086,199 @@ class MaliAPIMailbox(BaseMailbox):
                             str(message.get("snippet") or ""),
                         ]
                     ).strip()
+                    search_text = self._yyds_decode_raw_content(search_text) or search_text
+                    search_text = re.sub(
+                        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+                        "",
+                        search_text,
+                    )
+                    if keyword and keyword.lower() not in search_text.lower():
+                        continue
+
+                    code = self._yyds_safe_extract(search_text, code_pattern)
+                    if code:
+                        self._log(f"[MaliAPI] 收到验证码: {code}")
+                        return code
+            except Exception:
+                pass
+            return None
+
+        return self._run_polling_wait(
+            timeout=timeout,
+            poll_interval=3,
+            poll_once=poll_once,
+        )
+
+
+class GPTMailMailbox(BaseMailbox):
+    """GPTMail 临时邮箱服务"""
+
+    def __init__(
+        self,
+        api_url: str = "https://mail.chatgpt.org.uk",
+        api_key: str = "",
+        domain: str = "",
+        proxy: str = None,
+    ):
+        self.api = (api_url or "https://mail.chatgpt.org.uk").rstrip("/")
+        self.api_key = str(api_key or "").strip()
+        self.domain = self._normalize_domain(domain)
+        self.proxy = build_requests_proxy_config(proxy)
+        self._email = None
+
+    @staticmethod
+    def _normalize_domain(value: Any) -> str:
+        domain = str(value or "").strip().lower()
+        if domain.startswith("@"):
+            domain = domain[1:]
+        return domain
+
+    @staticmethod
+    def _generate_local_part() -> str:
+        import string
+
+        prefix = "".join(random.choices(string.ascii_lowercase, k=6))
+        suffix = "".join(random.choices(string.digits, k=4))
+        return f"{prefix}{suffix}"
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"accept": "application/json"}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        return headers
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json_body: dict | None = None,
+        timeout: int = 15,
+    ) -> Any:
+        import requests
+
+        response = requests.request(
+            method,
+            f"{self.api}{path}",
+            params=params,
+            json=json_body,
+            headers=self._headers(),
+            proxies=self.proxy,
+            timeout=timeout,
+        )
+        try:
+            payload = response.json()
+        except Exception as exc:
+            preview = (response.text or "")[:200]
+            raise RuntimeError(
+                f"GPTMail API {path} 返回非 JSON: HTTP {response.status_code} {preview}"
+            ) from exc
+
+        if response.status_code >= 400:
+            error = payload.get("error") if isinstance(payload, dict) else ""
+            message = str(error or response.text or f"HTTP {response.status_code}").strip()
+            raise RuntimeError(f"GPTMail API {path} 失败: {message}")
+
+        if isinstance(payload, dict) and payload.get("success") is False:
+            error = str(payload.get("error") or "unknown error").strip()
+            raise RuntimeError(f"GPTMail API {path} 失败: {error}")
+
+        if isinstance(payload, dict) and "data" in payload:
+            return payload.get("data")
+        return payload
+
+    def _list_messages(self, email: str) -> list[dict]:
+        data = self._request_json("GET", "/api/emails", params={"email": email}, timeout=10)
+        if isinstance(data, dict):
+            messages = data.get("emails", [])
+        else:
+            messages = data
+        return [item for item in (messages or []) if isinstance(item, dict)]
+
+    def _get_message_detail(self, message_id: str) -> dict[str, Any]:
+        data = self._request_json("GET", f"/api/email/{message_id}", timeout=10)
+        return data if isinstance(data, dict) else {}
+
+    def get_email(self) -> MailboxAccount:
+        if self.domain:
+            email = f"{self._generate_local_part()}@{self.domain}"
+            self._email = email
+            self._log(f"[GPTMail] 本地拼装邮箱: {email}")
+            return MailboxAccount(
+                email=email,
+                account_id=email,
+                extra={"provider": "gptmail", "domain": self.domain, "local_address": True},
+            )
+
+        data = self._request_json("GET", "/api/generate-email")
+        if not isinstance(data, dict):
+            raise RuntimeError(f"GPTMail 返回异常: {data}")
+
+        email = str(data.get("email") or "").strip()
+        if not email:
+            raise RuntimeError(f"GPTMail 返回空邮箱: {data}")
+
+        self._email = email
+        self._log(f"[GPTMail] 生成邮箱: {email}")
+        return MailboxAccount(
+            email=email,
+            account_id=email,
+            extra={"provider": "gptmail"},
+        )
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        try:
+            return {
+                str(message.get("id"))
+                for message in self._list_messages(account.email)
+                if message.get("id") is not None
+            }
+        except Exception:
+            return set()
+
+    def wait_for_code(
+        self,
+        account: MailboxAccount,
+        keyword: str = "",
+        timeout: int = 120,
+        before_ids: set = None,
+        code_pattern: str = None,
+        **kwargs,
+    ) -> str:
+        import re
+
+        seen = {str(mid) for mid in (before_ids or set())}
+        exclude_codes = {
+            str(code) for code in (kwargs.get("exclude_codes") or set()) if code
+        }
+
+        def poll_once() -> Optional[str]:
+            try:
+                messages = self._list_messages(account.email)
+                for message in messages:
+                    message_id = str(message.get("id") or "").strip()
+                    if not message_id or message_id in seen:
+                        continue
+                    seen.add(message_id)
+
+                    try:
+                        detail = self._get_message_detail(message_id)
+                    except Exception:
+                        detail = {}
+
+                    search_text = " ".join(
+                        [
+                            str(message.get("subject") or ""),
+                            str(message.get("from_address") or ""),
+                            str(message.get("content") or ""),
+                            str(message.get("html_content") or ""),
+                            str(detail.get("subject") or ""),
+                            str(detail.get("content") or ""),
+                            str(detail.get("html_content") or ""),
+                            str(detail.get("raw_headers") or ""),
+                        ]
+                    ).strip()
                     search_text = self._decode_raw_content(search_text) or search_text
                     search_text = re.sub(
                         r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
@@ -973,8 +1289,10 @@ class MaliAPIMailbox(BaseMailbox):
                         continue
 
                     code = self._safe_extract(search_text, code_pattern)
+                    if code and code in exclude_codes:
+                        continue
                     if code:
-                        self._log(f"[MaliAPI] 收到验证码: {code}")
+                        self._log(f"[GPTMail] 收到验证码: {code}")
                         return code
             except Exception:
                 pass
@@ -1827,6 +2145,11 @@ class FreemailMailbox(BaseMailbox):
         **kwargs,
     ) -> str:
         seen = set(before_ids or [])
+        exclude_codes = {
+            str(code).strip()
+            for code in (kwargs.get("exclude_codes") or set())
+            if str(code or "").strip()
+        }
 
         def poll_once() -> Optional[str]:
             try:
@@ -1841,8 +2164,10 @@ class FreemailMailbox(BaseMailbox):
                         continue
                     seen.add(mid)
                     # 直接用 verification_code 字段
-                    code = str(msg.get("verification_code") or "")
+                    code = str(msg.get("verification_code") or "").strip()
                     if code and code != "None":
+                        if code in exclude_codes:
+                            continue
                         return code
                     # 兜底：从 preview 提取
                     text = (
@@ -1850,6 +2175,8 @@ class FreemailMailbox(BaseMailbox):
                     )
                     code = self._safe_extract(text, code_pattern)
                     if code:
+                        if code in exclude_codes:
+                            continue
                         return code
             except Exception:
                 pass

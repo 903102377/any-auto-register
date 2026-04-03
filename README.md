@@ -28,6 +28,7 @@
 - [Electron 开发说明](#electron-开发说明)
 - [License](#license)
 - [用户讨论群](#用户讨论群)
+- [打赏博主](#赞助支持)
 - [Star History](#star-history)
 
 ## 项目简介
@@ -130,6 +131,7 @@
 | TempMail.lol | `tempmail_lol` | 临时邮箱方案，部分地区可能需要代理 |
 | SkyMail (CloudMail) | `skymail` | 通过 API / Token / 域名使用 |
 | YYDS Mail / MaliAPI | `maliapi` | 支持域名与自动域名策略 |
+| GPTMail | `gptmail` | 基于 GPTMail API 生成临时邮箱并轮询邮件，支持已知域名时本地拼装随机地址 |
 | DuckMail | `duckmail` | 临时邮箱方案 |
 | Freemail | `freemail` | 自建邮箱服务 |
 | Laoudo | `laoudo` | 固定邮箱方案 |
@@ -522,6 +524,12 @@ MIT License — 仅供学习研究，禁止商业使用。
 ## 用户讨论群
 
 - QQ群：**1065114376**（any-auto-register 注册机用户讨论群）
+
+## 赞助支持
+
+如果这个项目对你有帮助，欢迎赞助支持项目继续维护与更新。
+
+![打赏码](docs/images/dashang.JPG)
 
 ## Star History
 

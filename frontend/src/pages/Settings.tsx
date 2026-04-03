@@ -25,6 +25,7 @@ const SELECT_FIELDS: Record<string, { label: string; value: string }[]> = {
     { label: 'DuckMail（自动生成）', value: 'duckmail' },
     { label: 'MoeMail (sall.cc)', value: 'moemail' },
     { label: 'YYDS Mail / MaliAPI', value: 'maliapi' },
+    { label: 'GPTMail', value: 'gptmail' },
     { label: 'Freemail（自建 CF Worker）', value: 'freemail' },
     { label: 'CF Worker（自建域名）', value: 'cfworker' },
   ],
@@ -120,6 +121,15 @@ const TAB_ITEMS = [
         ],
       },
       {
+        title: 'GPTMail',
+        desc: '基于 GPTMail API 生成临时邮箱并轮询邮件；若已知本站可用域名，也可本地拼装随机地址',
+        fields: [
+          { key: 'gptmail_base_url', label: 'API URL', placeholder: 'https://mail.chatgpt.org.uk' },
+          { key: 'gptmail_api_key', label: 'API Key', secret: true, placeholder: 'gpt-test' },
+          { key: 'gptmail_domain', label: '邮箱域名（可选）', placeholder: 'example.com' },
+        ],
+      },
+      {
         title: 'TempMail.lol',
         desc: '自动生成邮箱，无需配置，需要代理访问（CN IP 被封）',
         fields: [],
@@ -193,6 +203,7 @@ const TAB_ITEMS = [
         fields: [
           { key: 'sub2api_api_url', label: 'API URL', placeholder: 'https://your-sub2api.example.com' },
           { key: 'sub2api_api_key', label: 'API Key', secret: true },
+          { key: 'sub2api_group_ids', label: '分组 ID', placeholder: '多个分组用英文逗号分隔，例如 2,4,8' },
         ],
       },
       {
@@ -1037,6 +1048,9 @@ export default function Settings() {
     apiFetch('/config').then((data) => {
       if (!data.mail_provider) {
         data.mail_provider = 'luckmail'
+      }
+      if (!data.gptmail_base_url) {
+        data.gptmail_base_url = 'https://mail.chatgpt.org.uk'
       }
       if (!data.maliapi_base_url) {
         data.maliapi_base_url = 'https://maliapi.215.im/v1'
